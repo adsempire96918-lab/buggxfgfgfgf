@@ -53,7 +53,7 @@ measured numbers.
 | T-07 | Per-session adaptive rate | `pool.go`, `session_rate_test.go` | 45 min | DONE |
 | T-08 | Keep-alive / TLS-handshake metric | `fetch.go`, `metrics.go`, `keepalive_metric_test.go` | 30 min | DONE |
 | T-09 | Health-based exit-IP routing | `advanced.go`, `vpn.go`, `lanes.go`, `vpn_region_health_test.go` | 60 min | DONE |
-| T-10 | Multi-IP budget independence + total budget verification | `iplimit.go`, `scaling_test.go` | 30 min | TODO |
+| T-10 | Multi-IP budget independence + total budget verification | `iplimit.go`, `scaling_test.go` | 30 min | DONE |
 
 ---
 
@@ -365,6 +365,14 @@ must be 5x.
 - Both tests pass.
 
 **Verify:** `go test -count=1 -run "TestMultiIP" -v .`
+**Done (2026-11-09):** `TestMultiIPBudgetIsIndependent` proves 5 proxies → 5
+distinct buckets at the FULL per-IP rate, that the 5 rotating groups of one IP
+all resolve to the SAME bucket, and that a drained IP cannot starve another.
+`TestMultiIPTotalBudget` proves Σ = N × per-IP rate (5 × 1200 = 6000/min) and
+that an AIMD `SetRate` moves every IP by the same factor. `IPLimiterGrouped.Len()`
+was added for the checks and the debug panels. Documented in `PROJECT_MAP.md`.
+Task record: `tasks/T-10-multi-ip-budget.md`.
+
 
 ---
 

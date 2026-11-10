@@ -910,3 +910,111 @@ func TestPrepareWorkResumesAndDedups(t *testing.T) {
 		t.Fatalf("todo = %v, want [gamma:pass]", todo)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// T-10 — multi-IP budget independence and the total budget
+// ---------------------------------------------------------------------------
+
+// multiIPProxies is the 5-proxy topology of the real run.bat.
+var multiIPProxies = []string{
+	"http://10.0.0.1:8080",
+	"http://10.0.0.2:8080",
+	"http://10.0.0.3:8080",
+	"http://10.0.0.4:8080",
+	"http://10.0.0.5:8080",
+}
+
+// TestMultiIPBudgetIsIndependent: with 5 proxies every exit IP gets its OWN
+// bucket at the FULL configured rate, and the rotating groups never create a
+// second budget for the same IP (the bug that gave one IP 5x its budget).
+func TestMultiIPBudgetIsIndependent(t *testing.T) {
+	const rate = 600.0
+	const groups = 5
+	lim := NewIPLimiterGrouped(rate, 2, groups)
+
+	perIP := make(map[string]*TokenBucket, len(multiIPProxies))
+	for _, proxy := range multiIPProxies {
+		var first *TokenBucket
+		for g := 0; g < groups; g++ {
+			b := lim.Bucket(proxy, g)
+			if b == nil {
+				t.Fatalf("%s group %d: nil bucket", proxy, g)
+			}
+			if first == nil {
+				first = b
+				continue
+			}
+			if b != first {
+				t.Fatalf("%s: group %d got a DIFFERENT bucket - the per-IP budget is multiplied by the groups", proxy, g)
+			}
+		}
+		if got := first.Rate(); got != rate {
+			t.Fatalf("%s: rate = %.1f, want %.1f (the full per-IP budget)", proxy, got, rate)
+		}
+		perIP[proxy] = first
+	}
+
+	if got := lim.Len(); got != len(multiIPProxies) {
+		t.Fatalf("limiter holds %d buckets, want %d (one per exit IP)", got, len(multiIPProxies))
+	}
+	seen := map[*TokenBucket]string{}
+	for proxy, b := range perIP {
+		if other, ok := seen[b]; ok {
+			t.Fatalf("%s and %s share one bucket", proxy, other)
+		}
+		seen[b] = proxy
+	}
+
+	// A drained IP must not take tokens away from another IP.
+	b1, b2 := perIP[multiIPProxies[0]], perIP[multiIPProxies[1]]
+	for i := 0; i < 2; i++ { // burst = 2
+		if !b1.TryWait() {
+			t.Fatalf("burst token %d not available on %s", i, multiIPProxies[0])
+		}
+	}
+	if b1.TryWait() {
+		t.Fatalf("%s served a third instant request - the burst is not bounded", multiIPProxies[0])
+	}
+	if !b2.TryWait() {
+		t.Fatalf("%s was starved by the drained IP - the budgets are not independent", multiIPProxies[1])
+	}
+}
+
+// TestMultiIPTotalBudget: the sum over the exit IPs is N x the per-IP rate,
+// and an AIMD change moves every IP by the same factor.
+func TestMultiIPTotalBudget(t *testing.T) {
+	const rate = 1200.0
+	const burst = 2
+	lim := NewIPLimiterGrouped(rate, burst, 5)
+	for _, proxy := range multiIPProxies {
+		lim.Bucket(proxy, 0)
+	}
+
+	ips := lim.IPs()
+	if len(ips) != len(multiIPProxies) {
+		t.Fatalf("IPs() = %v, want %d entries", ips, len(multiIPProxies))
+	}
+	total := 0.0
+	for _, ip := range ips {
+		total += lim.Bucket(ip, 0).Rate()
+	}
+	if want := float64(len(multiIPProxies)) * rate; total != want {
+		t.Fatalf("total budget = %.0f/min, want %.0f/min (%d x %.0f)", total, want, len(multiIPProxies), rate)
+	}
+
+	// AIMD: every IP follows the same multiplier, the total stays N x rate.
+	lim.SetRate(rate * 0.85)
+	total = 0
+	for _, ip := range ips {
+		if got := lim.Bucket(ip, 0).Rate(); got != rate*0.85 {
+			t.Fatalf("%s rate = %.1f after SetRate, want %.1f", ip, got, rate*0.85)
+		}
+		total += lim.Bucket(ip, 0).Rate()
+	}
+	if want := float64(len(multiIPProxies)) * rate * 0.85; total != want {
+		t.Fatalf("total after the AIMD shrink = %.0f, want %.0f", total, want)
+	}
+	if got := lim.Rate(); got != rate*0.85 {
+		t.Fatalf("limiter Rate() = %.1f, want %.1f", got, rate*0.85)
+	}
+}

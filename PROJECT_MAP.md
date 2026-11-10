@@ -191,6 +191,22 @@ and the per-IP limit (~162 req/s) bites first on a single exit IP.
     stays a separate signal — fixed 2026-11-09 (T-03), test
     `TestSharedBreakerOpensOnceForAllLanes`.
 
+### Multi-IP budget (T-10, verified 2026-11-09)
+
+`IPLimiterGrouped` keeps exactly ONE token bucket per EXIT IP, always at the
+FULL `--rate-per-ip` rate. With N proxies the total budget is N x the rate:
+
+| Proxies | Per-IP rate | Total budget |
+|---|---|---|
+| 1 | 1200/min | 1200/min |
+| 5 | 1200/min | **6000/min** |
+
+The rotating groups of one IP all resolve to the same bucket (groups drive the
+session rotation and the panels only), so a single IP can never receive
+5 x its budget. A drained IP climbs its own queue without starving another, and
+an AIMD `SetRate` scales every IP by the same factor. Regression tests:
+`TestMultiIPBudgetIsIndependent`, `TestMultiIPTotalBudget`.
+
 ## Measured load-test results (500 lanes, one exit IP)
 | Rate | Block rate | Transport failures | Verdict |
 |---|---|---|---|

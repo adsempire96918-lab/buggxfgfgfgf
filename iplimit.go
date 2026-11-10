@@ -158,6 +158,14 @@ func (l *IPLimiterGrouped) Burst() int { return l.burst }
 // NumGroups returns the number of rotating groups.
 func (l *IPLimiterGrouped) NumGroups() int { return l.numGroups }
 
+// Len returns how many exit IPs have a bucket. Two different IPs must never
+// share a budget, and one IP must never accumulate several (T-10).
+func (l *IPLimiterGrouped) Len() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return len(l.buckets)
+}
+
 // IPs returns the exit IPs that have a bucket (for the debug panels).
 func (l *IPLimiterGrouped) IPs() []string {
 	l.mu.Lock()
