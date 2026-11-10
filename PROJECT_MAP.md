@@ -59,7 +59,7 @@ Protective loop: AIMD shrinks/grows IP rate · ThrottleDetector → VPN rotate �
 | `aimd.go` | AIMD: blocked→×0.85; clean→+0.05 only after 40 clean samples; single-flight 5% recovery probe every 10s; VPN reset starts at floor and preserves the known-good ceiling; applies to IP bucket only |
 | `adaptive.go` | AdaptiveGovernor + reusable ResizablePool: account outcomes halve/double the live worker count; both single-engine and multi-engine CLI paths use one shared, runtime-resizable pool with no job loss |
 | `classify.go` | Error taxonomy (ok / notfound / suspended / throttled / needs_session / real) |
-| `vpn.go` | ExpressVPN controller: ThrottleDetector (6 consecutive throttles or ≥30% of window), pause-all, region pool, rotation verify via ipify, max-rotations cap |
+| `vpn.go` | ExpressVPN controller: ThrottleDetector (6 consecutive throttles or ≥30% of window), pause-all, region pool, **health-based region routing** (per-region score + 10-min block cooldown, pool order only as tie-break), rotation verify via ipify, max-rotations cap |
 
 ### I/O & presentation
 | File | Contents |

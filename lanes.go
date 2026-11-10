@@ -975,8 +975,16 @@ func (m *MultiChecker) process(ctx context.Context, index int, raw string) Accou
 	// genuinely rate limited (never on a single transient result)
 	if m.pause != nil {
 		if res.Error == "blocked" {
-			// a Reddit block page is definitive - rotate the exit IP now
-			m.pause.ReportIPBlocked("blocked page")
+			// a Reddit block page is definitive - rotate the exit IP now.
+			// The reason carries the measured path health, so the rotation
+			// history explains whether the whole exit path failed (T-09).
+			reason := "blocked page"
+			if m.sourceHealth != nil {
+				if healthy, total, ratio := m.sourceHealth.PathHealth(); total > 0 {
+					reason = fmt.Sprintf("blocked page (path health %d/%d = %.0f%%)", healthy, total, ratio*100)
+				}
+			}
+			m.pause.ReportIPBlocked(reason)
 		} else if res.Error == "rate_limited" {
 			// an explicit 429 means this exit IP is already over budget -
 			// rotate IMMEDIATELY instead of waiting for the consecutive

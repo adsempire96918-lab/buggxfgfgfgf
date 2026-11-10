@@ -262,6 +262,28 @@ func (h *SourceHealthTracker) RecordCheck(source string, success bool, responseT
 	}
 }
 
+// PathHealth summarises the tracker as "how much of the exit path works":
+// the share of recorded sources that are still healthy (0..1). The VPN router
+// uses it to describe WHY it is rotating - a path where most sources fail is
+// the exit IP's problem, not the sessions' (T-09).
+func (h *SourceHealthTracker) PathHealth() (healthy, total int, ratio float64) {
+	if h == nil {
+		return 0, 0, 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, info := range h.sources {
+		total++
+		if info.isHealthy {
+			healthy++
+		}
+	}
+	if total > 0 {
+		ratio = float64(healthy) / float64(total)
+	}
+	return healthy, total, ratio
+}
+
 // GetBestSource returns the healthiest source name ("" when none).
 func (h *SourceHealthTracker) GetBestSource() string {
 	h.mu.Lock()

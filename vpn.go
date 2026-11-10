@@ -77,9 +77,12 @@ type VPNController struct {
 	run   func(args ...string) (string, error)      // expressvpnctl runner (injectable)
 	ipNow func(ctx context.Context) (string, error) // exit IP probe (injectable)
 
-	mu         sync.Mutex
-	regions    []string
-	regionIdx  int
+	mu        sync.Mutex
+	regions   []string
+	regionIdx int
+	// health is the per-region routing score (T-09): the rotation prefers the
+	// healthiest region instead of blindly taking the next one in the list.
+	health     map[string]*regionHealth
 	lastRotate time.Time
 	rotations  int64
 	onRotated  func(rec RotationRecord)
@@ -122,6 +125,7 @@ func NewVPNController(cfg VPNConfig) *VPNController {
 	v := &VPNController{
 		cfg:      cfg,
 		detector: NewThrottleDetector(cfg.Threshold, cfg.WindowMin, cfg.WindowRatio),
+		health:   make(map[string]*regionHealth),
 	}
 	v.run = v.execCtl
 	v.ipNow = probeExitIP
@@ -315,21 +319,131 @@ func (v *VPNController) regionPool(ctx context.Context) []string {
 	return out
 }
 
-// nextRegion returns the next pool region (skipping the current one).
+// regionBlockCooldown is how long a region that just produced a block or a
+// failed rotation is ranked BELOW every untried region (T-09). After it the
+// region is allowed to prove itself again.
+const regionBlockCooldown = 10 * time.Minute
+
+// regionHealth is the per-region routing record: how often a rotation to that
+// region worked, how often it failed, and when it last burned us.
+type regionHealth struct {
+	ok        int64
+	bad       int64
+	lastBlock time.Time
+}
+
+// RegionHealthStats is a read-only view of one region's record.
+type RegionHealthStats struct {
+	Region    string
+	OK        int64
+	Bad       int64
+	Score     float64
+	BlockedAt time.Time
+}
+
+// RecordRegionOutcome feeds one rotation attempt (or an IP-block report) into
+// the region score. A success proves the region works again and clears the
+// cooldown; a failure starts it.
+func (v *VPNController) RecordRegionOutcome(region string, ok bool) {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if region == "" {
+		return
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.health == nil {
+		v.health = make(map[string]*regionHealth)
+	}
+	h := v.health[region]
+	if h == nil {
+		h = &regionHealth{}
+		v.health[region] = h
+	}
+	if ok {
+		h.ok++
+		h.lastBlock = time.Time{}
+		return
+	}
+	h.bad++
+	h.lastBlock = time.Now()
+}
+
+// regionScoreLocked ranks a region. The caller holds v.mu.
+//
+//	untried region        -> 0.50  (neutral; the pool order decides)
+//	clean region          -> 0.50..1.00 (Laplace-smoothed success ratio)
+//	blocked within 10 min -> negative, i.e. below EVERY healthy region
+func (v *VPNController) regionScoreLocked(region string) float64 {
+	h := v.health[region]
+	if h == nil {
+		return 0.5
+	}
+	score := float64(h.ok+1) / float64(h.ok+h.bad+2)
+	if !h.lastBlock.IsZero() && time.Since(h.lastBlock) < regionBlockCooldown {
+		score -= 0.75
+	}
+	return score
+}
+
+// RegionScore returns the current routing score of one region.
+func (v *VPNController) RegionScore(region string) float64 {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.regionScoreLocked(strings.ToLower(strings.TrimSpace(region)))
+}
+
+// RegionStats returns a snapshot of every region with a record (debug panel).
+func (v *VPNController) RegionStats() []RegionHealthStats {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	out := make([]RegionHealthStats, 0, len(v.health))
+	for name, h := range v.health {
+		out = append(out, RegionHealthStats{
+			Region:    name,
+			OK:        h.ok,
+			Bad:       h.bad,
+			Score:     v.regionScoreLocked(name),
+			BlockedAt: h.lastBlock,
+		})
+	}
+	return out
+}
+
+// nextRegion returns the HEALTHIEST pool region that is not the current one.
+//
+// The pool order stays the fallback: equal scores are resolved by walking the
+// list from the round-robin cursor, so a fresh controller behaves exactly like
+// the old next-in-list rotation, and a region that was just blocked is ranked
+// below everything else for regionBlockCooldown.
 func (v *VPNController) nextRegion(regions []string, current string) string {
 	if len(regions) == 0 {
 		return ""
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	start := v.regionIdx
+	best, bestScore := "", 0.0
 	for i := 0; i < len(regions); i++ {
-		r := regions[v.regionIdx%len(regions)]
-		v.regionIdx = (v.regionIdx + 1) % len(regions)
-		if r != current {
-			return r
+		r := regions[(start+i)%len(regions)]
+		if r == current {
+			continue
+		}
+		sc := v.regionScoreLocked(r)
+		// strictly greater keeps the pool order as the tie-break
+		if best == "" || sc > bestScore {
+			best, bestScore = r, sc
 		}
 	}
-	return ""
+	if best == "" {
+		return ""
+	}
+	for i, r := range regions {
+		if r == best {
+			v.regionIdx = (i + 1) % len(regions)
+			break
+		}
+	}
+	return best
 }
 
 // regionCountry extracts the country prefix of an ExpressVPN region id.
@@ -361,33 +475,38 @@ func (v *VPNController) nextRegionDifferentCountry(regions []string, current str
 	}
 	curCountry := regionCountry(current)
 
-	// Pass 1: a region from another country.
+	// Pass 1: the HEALTHIEST region from another country (T-09 scoring, with
+	// the pool order as the tie-break).
 	v.mu.Lock()
 	start := v.regionIdx
+	best, bestScore := "", 0.0
 	for i := 0; i < len(regions); i++ {
-		idx := (start + i) % len(regions)
-		r := regions[idx]
+		r := regions[(start+i)%len(regions)]
 		if r == current {
 			continue
 		}
-		if curCountry != "" && regionCountry(r) != curCountry {
-			v.regionIdx = (idx + 1) % len(regions)
-			v.mu.Unlock()
-			return r
+		if curCountry != "" && regionCountry(r) == curCountry {
+			continue
+		}
+		sc := v.regionScoreLocked(r)
+		if best == "" || sc > bestScore {
+			best, bestScore = r, sc
 		}
 	}
-	// Pass 2: any other region (same country is still a new IP).
-	for i := 0; i < len(regions); i++ {
-		idx := (start + i) % len(regions)
-		r := regions[idx]
-		if r != current {
-			v.regionIdx = (idx + 1) % len(regions)
-			v.mu.Unlock()
-			return r
+	if best != "" {
+		for i, r := range regions {
+			if r == best {
+				v.regionIdx = (i + 1) % len(regions)
+				break
+			}
 		}
+		v.mu.Unlock()
+		return best
 	}
 	v.mu.Unlock()
-	return ""
+
+	// Pass 2: any other region (same country is still a new IP).
+	return v.nextRegion(regions, current)
 }
 
 // currentRegion resolves the region the daemon is connected to right now.
@@ -428,6 +547,12 @@ func (v *VPNController) Report(clean bool, reason string) bool {
 func (v *VPNController) ReportIPBlocked(reason string) bool {
 	if v == nil || !v.Enabled() || v.capped.Load() {
 		return false
+	}
+	// The region we are connected to just served a block page, so its exit IP
+	// is burned: score it down BEFORE the rotation picks the next region, so
+	// the router does not walk straight back into it (T-09).
+	if region := v.currentRegion(); region != "" {
+		v.RecordRegionOutcome(region, false)
 	}
 	return v.Trigger(reason)
 }
@@ -548,16 +673,19 @@ func (v *VPNController) rotate(reason string) {
 		if out, err := v.run("connect", region); err != nil {
 			rec.Detail = firstLine(out)
 			fmt.Printf("expressvpnctl connect %s failed: %v (%s)\n", region, err, firstLine(out))
+			v.RecordRegionOutcome(region, false)
 			continue
 		}
 		if err := v.waitState(ctx, "Connected", v.cfg.ConnectTimeout); err != nil {
 			rec.Detail = err.Error()
 			fmt.Printf("VPN: %s did not reach Connected (%v) - trying the next region.\n", region, err)
+			v.RecordRegionOutcome(region, false)
 			continue
 		}
 		rec.ToRegion = region
 		if !v.cfg.VerifyIP {
 			rec.OK = true
+			v.RecordRegionOutcome(region, true)
 			break
 		}
 		// ExpressVPN reports "Connected" before the data tunnel has really
@@ -569,9 +697,11 @@ func (v *VPNController) rotate(reason string) {
 		newIP, ok := v.waitNewExitIP(ctx, rec.FromIP)
 		if ok {
 			rec.ToIP, rec.OK = newIP, true
+			v.RecordRegionOutcome(region, true)
 			break
 		}
 		rec.Detail = "exit IP unchanged"
+		v.RecordRegionOutcome(region, false)
 		fmt.Printf("VPN: %s exit IP did not change - trying the next region.\n", region)
 		if out, derr := v.run("disconnect"); derr != nil {
 			fmt.Printf("expressvpnctl disconnect failed: %v (%s)\n", derr, firstLine(out))

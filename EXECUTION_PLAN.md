@@ -52,7 +52,7 @@ measured numbers.
 | T-06 | Progress-line throttle | `report.go`, `lanes.go`, `progress_throttle_test.go` | 20 min | DONE |
 | T-07 | Per-session adaptive rate | `pool.go`, `session_rate_test.go` | 45 min | DONE |
 | T-08 | Keep-alive / TLS-handshake metric | `fetch.go`, `metrics.go`, `keepalive_metric_test.go` | 30 min | DONE |
-| T-09 | Health-based exit-IP routing | `advanced.go`, `vpn.go`, `lanes.go` | 60 min | TODO |
+| T-09 | Health-based exit-IP routing | `advanced.go`, `vpn.go`, `lanes.go`, `vpn_region_health_test.go` | 60 min | DONE |
 | T-10 | Multi-IP budget independence + total budget verification | `iplimit.go`, `scaling_test.go` | 30 min | TODO |
 
 ---
@@ -320,7 +320,8 @@ so keep-alive is working. Task record: `tasks/T-08-keepalive-metric.md`.
 **Problem:** `SourceHealthTracker` records which session/proxy works but
 nothing routes on it. The VPN rotates to the next region blindly.
 
-**Files (only these):** `advanced.go`, `vpn.go`, `lanes.go`
+**Files (only these):** `advanced.go`, `vpn.go`, `lanes.go`, `vpn_region_health_test.go`
+(scope widened before the work — the tests need their own file)
 
 **Steps**
 1. Keep a per-region success score in the VPN controller.
@@ -332,6 +333,18 @@ nothing routes on it. The VPN rotates to the next region blindly.
 **Acceptance**
 - A region that was blocked is not picked again immediately.
 - `go test -count=1 ./...` passes.
+**Done (2026-11-09):** `VPNController` keeps a per-region record
+(`ok`/`bad`/`lastBlock`) and ranks with the Laplace-smoothed success ratio minus
+0.75 while the region is inside its 10-minute block cooldown, so a burned region
+sinks below every healthy one. `nextRegion` and `nextRegionDifferentCountry`
+both pick the best score and use the pool order only as the tie-break, so a
+fresh controller behaves exactly like before. Every rotation attempt records its
+outcome, and `ReportIPBlocked` burns the region we are connected to before the
+rotation chooses (measured in `TestVPNABlockPageScoresTheCurrentRegion`:
+usa-east blocked → next connect is germany-1). `advanced.go` gained
+`SourceHealthTracker.PathHealth()` and the rotation reason now carries it.
+Task record: `tasks/T-09-region-health-routing.md`.
+
 
 ---
 
