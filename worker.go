@@ -62,6 +62,8 @@ const maxPreflightRotations = 3
 // Checker runs one batch of usernames.
 type Checker struct {
 	cfg           CheckConfig
+	browserOnce   sync.Once // single-flight lazy Chrome start (see browserFetch)
+	browserErr    error
 	out           *OutputWriter
 	stats         Stats
 	start         time.Time
@@ -432,18 +434,26 @@ func (ch *Checker) buildSources() error {
 
 // browserFetch lazily starts the browser fallback lane.
 func (ch *Checker) browserFetch(ctx context.Context, user string) UserResult {
-	if ch.browser == nil {
+	// single-flight: concurrent workers must not launch several Chromes
+	ch.browserOnce.Do(func() {
 		// a profile page load must not eat the whole request timeout
 		bt := ch.cfg.Timeout
 		if bt <= 0 || bt > 12*time.Second {
 			bt = 12 * time.Second
 		}
-		b, err := NewBrowserFallback(ch.cfg.Output, true, bt,
+		b, err := newBrowserFallback(ch.cfg.Output, true, bt,
 			ch.cfg.BrowserPages, ch.cfg.BrowserBudget)
 		if err != nil {
-			return errResult("browser_unavailable", err.Error())
+			ch.browserErr = err
+			return
 		}
 		ch.browser = b
+	})
+	if ch.browserErr != nil {
+		return errResult("browser_unavailable", ch.browserErr.Error())
+	}
+	if ch.browser == nil {
+		return errResult("browser_unavailable", "the browser lane did not start")
 	}
 	return ch.browser.Fetch(ctx, user)
 }

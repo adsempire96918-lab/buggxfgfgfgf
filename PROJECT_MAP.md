@@ -207,6 +207,21 @@ session rotation and the panels only), so a single IP can never receive
 an AIMD `SetRate` scales every IP by the same factor. Regression tests:
 `TestMultiIPBudgetIsIndependent`, `TestMultiIPTotalBudget`.
 
+20. **The browser fallback must start ONCE.** The lazy start was
+    `if m.browser == nil { launch() }`, so several workers hitting the last
+    ladder rung at the same moment launched several Chromes against the same
+    profile dir - one leaked and the pointer was raced. Both paths now use
+    `sync.Once` (`MultiChecker.browserOnce`, `Checker.browserOnce`, seam
+    `newBrowserFallback`), a failed start is remembered instead of retried per
+    user, and the run closes the Chrome it started - fixed 2026-11-09, tests
+    `TestBrowserFallbackLazyInitIsSingleFlight`,
+    `TestCheckerBrowserFallbackLazyInitIsSingleFlight`.
+21. **A platform-specific test must skip, not fail.** `TestMockCtlEndToEnd`
+    drives a Windows `.bat` through the real exec path, so on Linux/macOS it
+    failed with "permission denied" and every gate looked broken for a reason
+    that had nothing to do with the code. It now skips off Windows - fixed
+    2026-11-09.
+
 ## Measured load-test results (500 lanes, one exit IP)
 | Rate | Block rate | Transport failures | Verdict |
 |---|---|---|---|

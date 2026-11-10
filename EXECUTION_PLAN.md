@@ -57,6 +57,19 @@ measured numbers.
 
 ---
 
+**Status 2026-11-09 (Linux gate):** T-01 … T-10 are DONE. Every task has a
+scope-locked record under `tasks/`, a regression test, and the full gate has
+been run after it (`gofmt -l .` empty, `go vet .` clean, `go build` ok,
+`go test -count=1 ./...` PASS, plus one `go test -race ./...` PASS run at the
+end). No live Reddit / VPN traffic was used for the verification.
+
+**Audit-found hardening (done with the backlog):**
+- the browser fallback is started exactly once per run (`sync.Once` in
+  `lanes.go` and `worker.go`, seam `newBrowserFallback`) and its Chrome is
+  closed when the run ends — it used to be able to launch several Chromes.
+- `TestMockCtlEndToEnd` now skips itself off Windows (it drives a `.bat`), so
+  a green suite means green.
+
 ## TASK CARDS
 
 ### T-01 — AIMD: slow recovery, no walk-back into the limit

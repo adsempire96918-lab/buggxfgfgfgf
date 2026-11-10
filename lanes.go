@@ -480,19 +480,24 @@ type MultiConfig struct {
 
 // MultiChecker runs a batch across the lane matrix.
 type MultiChecker struct {
-	cfg           MultiConfig
-	out           *OutputWriter
-	mgr           *LaneManager
-	ipLim         *IPLimiterGrouped
-	stats         Stats
-	start         time.Time
-	reqs          int64
-	abort         atomic.Bool
-	poolGovernor  *AdaptiveGovernor
-	sources       []Source
-	srcRot        int64
-	anon          *Client
-	browser       *BrowserFallback
+	cfg          MultiConfig
+	out          *OutputWriter
+	mgr          *LaneManager
+	ipLim        *IPLimiterGrouped
+	stats        Stats
+	start        time.Time
+	reqs         int64
+	abort        atomic.Bool
+	poolGovernor *AdaptiveGovernor
+	sources      []Source
+	srcRot       int64
+	anon         *Client
+	browser      *BrowserFallback
+	// browserOnce guards the lazy Chrome start: without it concurrent ladder
+	// fallbacks raced on m.browser and launched several Chromes (one leaked,
+	// and the field itself was read/written without synchronization).
+	browserOnce   sync.Once
+	browserErr    error
 	aimd          *AIMD
 	aimdMu        sync.Mutex
 	lastMult      float64
@@ -771,6 +776,8 @@ func (m *MultiChecker) Run(ctx context.Context, users []string) bool {
 		m.poolGovernor.Report(outcome == OutcomeClean)
 	})
 	workerPool.Run(ctx)
+	// the fallback Chrome (if any) must not outlive the run
+	defer m.closeBrowser()
 
 	m.summary()
 	m.writeSessionReport()
@@ -1122,24 +1129,44 @@ func (m *MultiChecker) resetAfterRotation(rec RotationRecord) {
 }
 
 // browserFetch lazily starts the browser fallback lane.
+//
+// The start is single-flight (sync.Once). Before that, two workers could both
+// see m.browser == nil and launch Chrome twice - one browser leaked, its
+// profile dir collided with the other, and the pointer itself was raced. A
+// failed start is remembered instead of retried per user: launching Chrome is
+// expensive and a failure here is environmental (no Chrome / no profile lock).
 func (m *MultiChecker) browserFetch(ctx context.Context, user string) UserResult {
-	if m.browser == nil {
+	m.browserOnce.Do(func() {
 		// a profile page load must not eat the whole request timeout
 		bt := m.cfg.Timeout
 		if bt <= 0 || bt > 12*time.Second {
 			bt = 12 * time.Second
 		}
-		b, err := NewBrowserFallback(m.cfg.Output, true, bt,
+		b, err := newBrowserFallback(m.cfg.Output, true, bt,
 			m.cfg.BrowserPages, m.cfg.BrowserBudget)
 		if err != nil {
-			return errResult("browser_unavailable", err.Error())
+			m.browserErr = err
+			return
+		}
+		if len(m.cfg.Sessions) > 0 {
+			b.SetSession(m.cfg.Sessions[0])
 		}
 		m.browser = b
-		if len(m.cfg.Sessions) > 0 {
-			m.browser.SetSession(m.cfg.Sessions[0])
-		}
+	})
+	if m.browserErr != nil {
+		return errResult("browser_unavailable", m.browserErr.Error())
+	}
+	if m.browser == nil {
+		return errResult("browser_unavailable", "the browser lane did not start")
 	}
 	return m.browser.Fetch(ctx, user)
+}
+
+// closeBrowser shuts down the fallback Chrome if it was ever started.
+func (m *MultiChecker) closeBrowser() {
+	if m.browser != nil {
+		m.browser.Close()
+	}
 }
 
 // finish writes the result (same format as the single-session checker).

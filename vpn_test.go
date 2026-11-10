@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -449,6 +450,13 @@ const mockCtlBat = "@echo off\r\n" +
 // TestMockCtlEndToEnd drives the REAL exec path against the mock .bat: the
 // controller is not touched at all, only the ipify probe is faked.
 func TestMockCtlEndToEnd(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		// The mock expressvpnctl is a .bat file driven by the real exec path;
+		// on Linux/macOS it can never be executed (no shebang, no exec bit),
+		// so this test only makes sense on Windows. Without this guard the
+		// whole suite reports a failure that has nothing to do with the code.
+		t.Skip("mock expressvpnctl is a Windows .bat - skipped on " + runtime.GOOS)
+	}
 	dir := t.TempDir()
 	bat := filepath.Join(dir, "mock-expressvpnctl.bat")
 	if err := os.WriteFile(bat, []byte(mockCtlBat), 0644); err != nil {

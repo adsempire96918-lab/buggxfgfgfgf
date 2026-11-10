@@ -35,6 +35,10 @@ type BrowserFallback struct {
 	timeout time.Duration
 }
 
+// newBrowserFallback is the seam the lazy browser start goes through. Tests
+// replace it to prove the start is single-flight without launching Chrome.
+var newBrowserFallback = NewBrowserFallback
+
 // NewBrowserFallback starts Chrome for the fallback lane.
 func NewBrowserFallback(dir string, headless bool, timeout time.Duration, pages, budget int) (*BrowserFallback, error) {
 	if timeout <= 0 {
